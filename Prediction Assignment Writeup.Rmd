@@ -1,0 +1,202 @@
+---
+title: "Prediction Assignment Writeup"
+author: "Claus Walter"
+date: "27 Februar 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Executive Summary
+The goal of this document is to find an appropriate approach to predict the manner in which certain physical exercises have been done. The underlying data has been collected and kindly provided by a group of enthusiasts using sensors while doing the exercises (see appendix for the according reference). Out of the methods analyzed, random forest is the most accurate. When applying the method, a tradeoff between accuracy and computing speed needed to be made. However, it turned out that using 18 variables delivers otpimal accuracy and kept computing times within reasonable limits. Using the random forest approach gave a prediction which resulted in 100% accuracy in predicting the required values. 
+
+## Preparation, Data Extraction and Exloratory Data Analysis
+Firstly, some preparation steps such as loading necessary libraries have been taken:
+```{r preparation, echo=TRUE, warning=FALSE, message=FALSE}
+## Preparation steps      
+        Sys.setlocale(category = "LC_ALL", locale = "US")
+        library(dplyr)
+        library(caret)
+        library(corrplot)
+        library(kernlab)
+        library(reshape)
+        library(ggplot2)
+        library(rpart)
+        library(randomForest)
+        
+        set.seed(1024)
+
+        path<-getwd()
+        pathIn1 <- file.path(path, "Fitbit_Training")
+        pathIn2 <- file.path(path, "Fitbit_Testing")
+        url1 <-"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+        url2 <-"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+        filename1 <- "pml-training.csv"
+        filename2 <- "pml-testing.csv"
+        filenameNpath1 <- file.path(path, filename1)
+        filenameNpath2 <- file.path(path, filename2)
+        if (!file.exists(path)) {dir.create(path)}
+        if (!file.exists(filenameNpath1)){
+                download.file(url1, destfile = filenameNpath1, mode = "wb")
+        }
+        if (!file.exists(filenameNpath2)){
+                download.file(url2, destfile = filenameNpath2, mode = "wb")
+        }
+
+        FitBit_Training <- read.csv("pml-training.csv", header=TRUE, sep=",", 
+                               as.is=TRUE, encoding = "UTF-8")
+        FitBit_Validation <- read.csv("pml-testing.csv", header=TRUE, sep=",", 
+                                    as.is=TRUE, encoding = "UTF-8")
+```
+
+Then, two data files are downloaded. One is used for creating the training and testing data sets, using the 60/40 rule of thumb for assigning data to either the training (60%) or testing (40%) data sets. Additionally, columns are identified and deleted that contain more than 95% of "NA" values. Please note that also empty cells are counted as "NA"-values. Imputation is not used, since the remaining variables show a high degree of valid resp. complete entries. To further speed up later data processing, an analysis of the importance and correlation of variables is conducted. For the indentification, the random forest approach has been chosen. To keep processing speed within acceptable limits, a third data set ("Eval") is created, which is used for variable evaluation, and which consists of 10% of the original training data set. This deviates from the standard procedure, which would assume that this is part of the model training, but computing speed constraint made this step necessary, understanding that a smaller loss of accuracy resp. slight overfitting may occur:
+
+```{r data preparation, echo=TRUE, warning=FALSE, message=FALSE}
+## Basic data preparation
+        FitBit_Training <- na_if(FitBit_Training, "")
+        FitBit_Validation <- na_if(FitBit_Validation, "")
+        temp<-which(colSums(is.na(FitBit_Training)*100/(nrow(FitBit_Training)-1))>95)
+        FitBit_Training<-FitBit_Training[, -temp]
+        FitBit_Validation <- FitBit_Validation[,-temp]
+
+        inTrain <- createDataPartition(y=FitBit_Training$classe, p=0.6, list=FALSE)
+        training <- FitBit_Training[inTrain,8:60]
+        testing <- FitBit_Training[-inTrain,8:60]
+        validation <- FitBit_Validation[,8:60]
+        inEval<-createDataPartition(y=FitBit_Training$classe, p=0.1, list=FALSE)
+        Eval<- FitBit_Training[inEval,8:60]
+        
+        ## feature selection
+        Eval[,1:52]<-sapply(Eval[,1:52], as.numeric)
+        Eval[,53]<-sapply(Eval[,53], as.factor)
+        control <- rfeControl(functions=rfFuncs, method="cv", number= 3, allowParallel = TRUE)
+        results<-rfe(x=Eval[,1:52], y=Eval[,53], sizes=c(1:52), rfeControl=control)
+        print(results)
+        predictors(results)
+```
+
+From the relative impact of number of variables on accuracy (see figure 1 below), it is concluded that the top-18 variables should be sufficient for working with the actual prediction models. This is specifically valid due to the fact that figure 1 is based on the "Eval" data sample. With higher numbers of records, processing times increase, but accuracy increases as well. Accordingly, the variables that contribute only very little to the overall increased accuracy are excluded from further analysis.
+
+```{r results plot, echo=TRUE, warning=FALSE, message=FALSE}
+        plot(results, type=c("g", "o"))
+```
+
+Figure 1: Result accuracy plot over number of variables taken into account
+
+The variables with the highest impact are the following:
+
+```{r rf model variable preparation, echo=TRUE, warning=FALSE, message=FALSE}
+## optimal values for p==0.1; several combinations of high correlation (pos and neg). Bias accepted.
+        ## Variables with highest impact - top-18 variables:
+        maxImpact<-c("roll_belt",
+                     "magnet_dumbbell_y",
+                     "magnet_dumbbell_z",
+                     "yaw_belt",
+                     "pitch_forearm",
+                     "pitch_belt",       
+                     "roll_dumbbell",
+                     "roll_forearm",
+                     "accel_dumbbell_y",
+                     "magnet_dumbbell_x",
+                     "magnet_belt_y",
+                     "magnet_belt_z",
+                     "accel_forearm_x",
+                     "accel_belt_z",
+                     "accel_dumbbell_z",
+                     "roll_arm",
+                     "gyros_dumbbell_y",
+                     "gyros_belt_z")
+```
+
+Correlation analysis for these variables (see figure 2 below) shows some high total values for 4 pairs, but given the existing accuracy for the overall set of variables, and a still high number of variables used, the potential bias is accepted, and the variable set used as identified by the variable importance analysis.
+
+```{r correlation plot, echo=TRUE, warning=FALSE, message=FALSE}
+        ## Check of correlations and re-confirmation of variable impact:
+        corrplot(cor(Eval[maxImpact]), order="hclust", method="circle")
+```
+
+Figure 2: Correlation plot
+
+Here the variable importance as additional value for evaluating the significance of the chosen ones:
+
+```{r variable impact, echo=TRUE, warning=FALSE, message=FALSE}
+        ## Check of correlations and re-confirmation of variable impact:
+        ## cor(Eval[maxImpact])
+        varImp(results)
+```
+
+## Model Selection and Data Analysis
+As could be seen from the variable importance analysis in the previous chapter, random forest analysis with the top-18 variables is already delivering a very accurate analysis. Plenty of alternative models are available which could be used to try yield an even more accurate result. However, to have a comparison of random forests to one model not using trees (linear discriminant analysis) and an alternative model using trees (decision trees), the analysis is extended to these models. Alternative promising models such as GBM are not analyzed here, since the yielded accuracy of random forest is already very high, so using weak predictors at the costs of processing time is not pursued.
+
+Prior to executing the various models, some additional data preparation is needed (lda and rpart models work with full data, rf with the reduced variable set):
+
+```{r model execution data preparation, echo=TRUE, warning=FALSE, message=FALSE}
+
+        ## Cutting out colunns not needed for rf, full data retained for lda and rpart:
+        validationFull<-validation
+        trainingFull<-training
+        testingFull<-testing
+        validation<-validation[,maxImpact]
+        maxImpact<-c(maxImpact, "classe")
+        training<-training[,maxImpact]
+        testing<-testing[,maxImpact]
+```
+
+**Linear Discriminant Analysis (lda):**
+For lda, the full training and test data set is applied, since for the processing speed, the impact of having a high amount of variables is not that significant (in contrast to random forest):
+
+```{r lda, echo=FALSE, message=FALSE}
+        modFit_lda <- train(classe~., data=trainingFull, method="lda")
+        modFit_lda
+        pred_lda <- predict(modFit_lda, testingFull)
+        confMatrix_lda <- confusionMatrix(pred_lda, testingFull$classe)
+        confMatrix_lda
+```
+
+As can be seen from the results of the confusion matrix, expected out of sample accuracy is 0.7074, hence the expected out of sample error is 0.2926.
+
+**Decision Tree (rpart):**
+As for lda, the full training data set is used, since processing speed for a high number of varialbes does not have a particularly high impact:
+
+```{r rpart, echo=FALSE, message=FALSE}
+        modFit_rpart <- train(classe~., data=trainingFull, method="rpart")
+        modFit_rpart
+        pred_rpart <- predict(modFit_rpart, testingFull)
+        confMatrix_rpart <- confusionMatrix(pred_rpart, testingFull$classe) 
+        confMatrix_rpart
+```
+
+As can be seen from the results of the confusion matrix, expected out of sample accuracy is 0.5644, hence the expected out of sample error is 0.4356.
+
+**Random Forest (rf):**
+For random forest, the variable set reduced to the top-18 variables is used, since here a high number of variables has a very high impact on processing time, without significantly increasing overall accuracy:
+
+```{r rf, echo=FALSE, message=FALSE}
+        control_rf<-trainControl(method="cv", number=3, allowParallel = TRUE)
+        modFit_rf <- train(classe ~ ., data=training, method="rf", trControl=control_rf)
+        modFit_rf
+        pred_rf <- predict(modFit_rf, testing)
+        confMatrix_rf <- confusionMatrix(pred_rf, testing$classe)   
+        confMatrix_rf
+```
+
+As can be seen from the results of the confusion matrix, expected out of sample accuracy is 0.987, hence the expected out of sample error is 0.0123.
+
+## Application of Random Forrest Prediction to the given Test Set
+With the very convincing results of the random forest model application, the given test data contained in "pml-testing.csv" is used to predict the values for tthe quiz:
+
+```{r results, echo=FALSE, message=FALSE}
+        predict(modFit_rf, validation)
+```
+
+## Conclusion
+For the given prediction task, random forests is a highly accurate approach. It is assumed that other approaches such as gbm may be even slightly more accurate, but at the expense of processing time. Basically, this also applies to the random forest approach: here, high accuracy has been achieved with only using a relatively small part of variables given. Here, an accuray level of almost 99% is considered acceptable, so random forest is the preferred approach, and more advanced approaches are neither considered nor necessary to be used.
+
+## Appendix
+For the kind group of enthusiasts that created and volunteered the data for this paper, please refer to <http://groupware.les.inf.puc-rio.br/har#collaborators> and the following paper:
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+Read more: <http://groupware.les.inf.puc-rio.br/har#collaborators#ixzz4aC1o4WOx>
+
